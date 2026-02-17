@@ -1,2 +1,3 @@
 #!/bin/sh
 npx @dotenvx/dotenvx ext precommit
+npm audit --audit-level=high

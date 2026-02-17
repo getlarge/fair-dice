@@ -4,6 +4,7 @@
   "private": true,
   "description": "A provably fair dice roller with cryptographic audit trail",
   "scripts": {
+    "audit": "npm audit --audit-level=high",
     "claude": "npx @dotenvx/dotenvx run -f .env.mcp -- claude",
     "prepare": "husky"
   },
