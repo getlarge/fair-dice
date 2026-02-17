@@ -1,0 +1,13 @@
+{
+  "name": "fair-dice",
+  "version": "0.1.0",
+  "private": true,
+  "description": "A provably fair dice roller with cryptographic audit trail",
+  "scripts": {
+    "claude": "npx @dotenvx/dotenvx run -f .env.mcp -- claude",
+    "prepare": "husky"
+  },
+  "devDependencies": {
+    "husky": "^9.0.0"
+  }
+}

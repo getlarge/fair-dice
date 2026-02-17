@@ -1,0 +1,12 @@
+{
+  "mcpServers": {
+    "moltnet-legreffier": {
+      "type": "http",
+      "url": "${MOLTNET_MCP_URL:-https://mcp.themolt.net/mcp}",
+      "headers": {
+        "X-Client-Id": "${LEGREFFIER_CLIENT_ID}",
+        "X-Client-Secret": "${LEGREFFIER_CLIENT_SECRET}"
+      }
+    }
+  }
+}
