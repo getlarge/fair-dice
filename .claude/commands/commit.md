@@ -1,7 +1,7 @@
 ---
-name: accountable-commit
-description: Create an accountable commit with a signed diary entry for audit trail. Triggered automatically by the PreToolUse hook when LeGreffier is active and a git commit is attempted on non-trivial changes.
-allowed-tools: 'Bash(git diff *), Bash(git commit *), Bash(moltnet sign *)'
+name: commit
+description: Create a commit with a signed diary entry for audit trail. Classifies risk, signs rationale cryptographically, and links the diary entry to the commit.
+allowed-tools: 'Bash(git diff *), Bash(git commit *), Bash(moltnet sign *), Bash(npx @themoltnet/cli sign *)'
 ---
 
 Create an accountable commit with a signed diary entry for audit trail.
@@ -42,10 +42,21 @@ Based on the paths in the diff:
 
 Write a conventional commit message and create the commit. Skip diary entry. Done.
 
-### 4. For high or medium risk: compose the diary content
+### 4. For high or medium risk: resolve agent identity, then compose diary content
 
-Write a brief rationale explaining _why_ these changes are being made and what they affect.
-Keep it factual and focused on intent + impact.
+**CRITICAL — do this BEFORE composing any content or metadata.**
+
+Call `agent_whoami` (or read the `moltnet://identity` resource) to get the agent's
+**fingerprint** (format: `XXXX-XXXX-XXXX-XXXX`). Store it — you will need it in the
+metadata block (step 5a).
+
+**NEVER fabricate, guess, or hardcode a fingerprint.** The fingerprint is a cryptographic
+identity derived from the agent's public key. If you invent one, signature verification
+will permanently fail — the whole audit trail becomes worthless. If `agent_whoami` fails
+or returns `authenticated: false`, STOP and tell the user the MCP connection is broken.
+
+Then write a brief rationale explaining _why_ these changes are being made and what
+they affect. Keep it factual and focused on intent + impact.
 
 ### 5. Build the signed envelope
 
@@ -62,12 +73,14 @@ Build the text block that will be signed (content + metadata, tags inclusive):
 <rationale text from step 4>
 </content>
 <metadata>
+signer: <fingerprint from step 4>
 risk-level: high
 files-changed: 5
 timestamp: 2026-02-16T12:00:00Z
 </metadata>
 ```
 
+The `signer` is the agent fingerprint obtained in step 4.
 The `timestamp` is the current ISO 8601 UTC time. `files-changed` is the count from `git diff --cached --stat`.
 
 #### 5b. Sign the payload
@@ -77,8 +90,17 @@ Use the 3-step signing protocol:
 1. Call `crypto_prepare_signature({ message: "<signable payload from 5a>" })`
    — returns `request_id`, `signing_payload`, `nonce`
 
-2. Run locally: `moltnet sign --credentials "<resolved path from step 0>" "<signing_payload>"`
-   — outputs a base64 signature
+2. Sign locally with the MoltNet CLI. Try `moltnet` first, fall back to npx:
+
+   ```bash
+   # If moltnet is in PATH (Homebrew or go install):
+   moltnet sign -credentials "<resolved path from step 0>" "<signing_payload>"
+
+   # Otherwise, via npm:
+   npx @themoltnet/cli sign -credentials "<resolved path from step 0>" "<signing_payload>"
+   ```
+
+   Outputs a base64-encoded Ed25519 signature to stdout.
 
 3. Call `crypto_submit_signature({ request_id: "<id>", signature: "<base64>" })`
    — confirms the signature is valid
@@ -93,6 +115,7 @@ Wrap everything in the TDB envelope:
 <rationale text>
 </content>
 <metadata>
+signer: <fingerprint from step 4>
 risk-level: high
 files-changed: 5
 timestamp: 2026-02-16T12:00:00Z
@@ -139,9 +162,12 @@ To verify a `<moltnet-signed>` entry later:
 
 1. Extract everything between `<content>` (inclusive) and `</metadata>` (inclusive)
 2. That is the original signing payload
-3. Extract the base64 string between `<signature>` and `</signature>`
-4. Verify with `crypto_verify({ message: "<payload>", signature: "<base64>" })`
-   or look up the agent's public key and verify the Ed25519 signature directly
+3. Extract the `signer:` fingerprint from the `<metadata>` block
+4. Extract the base64 string between `<signature>` and `</signature>`
+5. Verify with `crypto_verify({ message: "<payload>", signature: "<base64>", signer_fingerprint: "<fingerprint>" })`
+
+The `signer_fingerprint` is mandatory — it tells the server which agent's public key
+to verify against. Without it, verification is impossible.
 
 ## Important
 
@@ -149,5 +175,5 @@ To verify a `<moltnet-signed>` entry later:
 - The diary entry should focus on _rationale and impact_, not repeat the diff.
 - If `diary_create` or `crypto_prepare_signature` is unavailable (no MCP connection),
   warn the user and offer to commit without a diary entry.
-- This skill does NOT run `git add` — stage your changes before running `/accountable-commit`.
+- This skill does NOT run `git add` — stage your changes before running `/commit`.
 - The signing request expires in 5 minutes — execute steps 5a-5c without pausing.
