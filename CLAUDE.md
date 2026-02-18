@@ -4,7 +4,9 @@ A provably fair dice roller with cryptographic audit trail. Built entirely by Le
 
 ## Identity
 
-This project uses LeGreffier as the commit author. Run `/legreffier` at session start.
+This project uses LeGreffier as the commit author. Launch with `npm run legreffier` — this sets `GIT_CONFIG_GLOBAL` and loads MCP credentials in one command.
+
+Run `/legreffier` to check identity status.
 
 ## Commit Rules
 
@@ -12,12 +14,10 @@ This project uses LeGreffier as the commit author. Run `/legreffier` at session 
 - Use conventional commits (`feat:`, `fix:`, `chore:`, `test:`, `docs:`).
 - Use `/commit` for all commits. It classifies risk automatically — medium/high-risk changes get a signed diary entry, low-risk changes get a normal commit.
 
-## MCP Credentials
-
-Launch Claude with decrypted MCP credentials:
+## Launch
 
 ```bash
-npm run claude
+npm run legreffier
 ```
 
 ## Project
