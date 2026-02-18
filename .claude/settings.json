@@ -1,4 +1,7 @@
 {
+  "env": {
+    "GIT_CONFIG_GLOBAL": ".moltnet/gitconfig"
+  },
   "hooks": {
     "PreToolUse": [
       {
