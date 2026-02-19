@@ -1,7 +1,7 @@
 'use strict';
 
-import path from 'path';
-import fs from 'fs';
+import path from 'node:path';
+import fs from 'node:fs';
 import { DatabaseSync } from 'node:sqlite';
 
 function ensureDir(dir) {

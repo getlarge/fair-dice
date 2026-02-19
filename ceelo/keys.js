@@ -1,9 +1,9 @@
 'use strict';
 
-import fs from 'fs';
-import path from 'path';
-import os from 'os';
-import crypto from 'crypto';
+import crypto from 'node:crypto';
+import fs from 'node:fs';
+import path from 'node:path';
+import os from 'node:os';
 
 function ensureDir(dir) {
   if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
