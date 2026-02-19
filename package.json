@@ -12,7 +12,7 @@
     "legreffier": "GIT_CONFIG_GLOBAL=.moltnet/gitconfig npx @dotenvx/dotenvx run -f .env.mcp -- claude",
     "prepare": "husky",
     "codex": "GIT_CONFIG_GLOBAL=.moltnet/gitconfig npx @dotenvx/dotenvx run -f .env.mcp -- codex",
-    "test": "node --test ceelo/rules.test.mjs"
+    "test": "node --test ceelo/rules.test.mjs ceelo/flow.test.mjs"
   },
   "dependencies": {
     "aedes": "^0.51.2",
