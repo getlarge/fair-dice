@@ -35,15 +35,38 @@ function loadAllowlist(file) {
   );
 }
 
+function hkdfDice({ seeds, beacon, hostSalt, gameId, handId }) {
+  const info = `cee-lo|${gameId}|${handId}|${new Date().toISOString()}`;
+  const material = Buffer.concat([
+    Buffer.from(seeds.join(''), 'hex'),
+    Buffer.from(beacon, 'hex'),
+    Buffer.from(hostSalt, 'hex'),
+  ]);
+  const okm = crypto.hkdfSync('sha256', material, Buffer.alloc(0), Buffer.from(info), 64);
+  const dice = [];
+  const used = [];
+  for (let i = 0; dice.length < 3 && i < okm.length; i++) {
+    const byte = okm[i];
+    if (byte >= 252) continue; // rejection sampling threshold
+    dice.push((byte % 6) + 1);
+    used.push(byte);
+  }
+  return { dice, usedBytes: Buffer.from(used).toString('hex'), okm: okm.toString('hex') };
+}
+
 function handleHost(rawArgs) {
   const args = parseArgs(rawArgs);
   const gameId = args.game || args.g;
   const port = Number(args.port || 8080);
   const mqttUrl = args.mqtt || `ws://0.0.0.0:${port}`;
   const allowlist = loadAllowlist(args.allowlist);
+  const minPlayers = Number(args['min-players'] || 2);
   const db = openDb(args.db || defaultDbPath());
   const { pubPem: hostPub } = loadOrCreateKey(args['host-key'] || defaultKeyPath('host'));
   const hostFp = fingerprint(hostPub);
+  const hostPriv = loadOrCreateKey(args['host-key'] || defaultKeyPath('host')).privPem;
+
+  const handState = new Map(); // hand_id -> { joins: Map(fp->{commit,pubkey}), reveals: Map(fp->{seed,pubkey}), hostSalt, proofed: boolean }
 
   const lobby = {
     game_id: gameId,
@@ -65,6 +88,17 @@ function handleHost(rawArgs) {
       const kind = topic.split('/')[2];
       try {
         const payload = JSON.parse(packet.payload.toString('utf8'));
+        const handId = payload.hand_id || 'hand-1';
+        if (!handState.has(handId)) {
+          handState.set(handId, {
+            joins: new Map(),
+            reveals: new Map(),
+            hostSalt: crypto.randomBytes(32).toString('hex'),
+            proofed: false,
+          });
+        }
+        const state = handState.get(handId);
+
         if (kind === 'joins') {
           if (allowlist && !allowlist.has(payload.player_fp)) {
             console.warn(`Reject join from ${payload.player_fp}: not in allowlist`);
@@ -79,6 +113,7 @@ function handleHost(rawArgs) {
             console.warn(`Invalid join signature from ${payload.player_fp}`);
             return;
           }
+          state.joins.set(payload.player_fp, { commit: payload.commit, pubkey: payload.pubkey });
           db.prepare(
             'INSERT OR IGNORE INTO join_envelopes(game_id, hand_id, player_fp, envelope_json, ts) VALUES(?,?,?,?,?)',
           ).run(
@@ -117,6 +152,11 @@ function handleHost(rawArgs) {
             console.warn(`Reveal seed does not match commit for ${payload.player_fp}`);
             return;
           }
+          state.reveals.set(payload.player_fp, {
+            seed: payload.seed,
+            pubkey: payload.pubkey,
+            commit: joinEnv.commit,
+          });
           db.prepare(
             'INSERT OR IGNORE INTO reveal_envelopes(game_id, hand_id, player_fp, envelope_json, ts) VALUES(?,?,?,?,?)',
           ).run(
@@ -126,6 +166,64 @@ function handleHost(rawArgs) {
             JSON.stringify(payload),
             new Date().toISOString(),
           );
+
+          // If enough reveals and not yet proofed, finalize hand
+          if (!state.proofed && state.reveals.size >= minPlayers) {
+            const beacon = crypto.randomBytes(32).toString('hex'); // TODO: replace with drand fetch
+            const seeds = Array.from(state.reveals.values()).map(r => r.seed);
+            const { dice, usedBytes, okm } = hkdfDice({
+              seeds,
+              beacon,
+              hostSalt: state.hostSalt,
+              gameId,
+              handId,
+            });
+
+            const players = Array.from(state.reveals.entries()).map(([fp, r]) => ({
+              player_fp: fp,
+              seed: r.seed,
+              commit: r.commit,
+            }));
+
+            const proof = {
+              game_id: gameId,
+              hand_id: handId,
+              beacon: { source: lobby.beacon_source, value: beacon },
+              host_salt: state.hostSalt,
+              players,
+              hkdf_info: `cee-lo|${gameId}|${handId}`,
+              dice_bytes: usedBytes,
+              dice,
+              hash_algo: 'sha256',
+              hkdf_algo: 'hkdf-sha256',
+              rejection_threshold: 252,
+              timestamp: new Date().toISOString(),
+              host_fp: hostFp,
+            };
+
+            const signature = sign(JSON.stringify(proof), hostPriv);
+            const proofEnvelope = { ...proof, signature };
+
+            db.prepare(
+              'INSERT OR IGNORE INTO hands(game_id, hand_id, beacon_round, proof_json, proof_sig, host_fp, ts) VALUES(?,?,?,?,?,?,?)',
+            ).run(
+              gameId,
+              handId,
+              beacon,
+              JSON.stringify(proofEnvelope),
+              signature,
+              hostFp,
+              new Date().toISOString(),
+            );
+
+            broker.publish({
+              topic: `cee-lo/${gameId}/proofs`,
+              payload: JSON.stringify(proofEnvelope),
+              qos: 1,
+            });
+            state.proofed = true;
+            console.log(`Hand ${handId} finalized with dice ${dice.join(',')}`);
+          }
         }
       } catch (err) {
         console.error('Failed to process publish:', err.message);
