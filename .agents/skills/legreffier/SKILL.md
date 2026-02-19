@@ -61,7 +61,7 @@ scope: <comma-separated scope tags>
    - Call `crypto_prepare_signature(message=<payload>)` → `request_id`, `signing_payload`, `nonce`.
    - Use the updated CLI that accepts nonce: `moltnet sign -credentials <path> --nonce "<nonce>" "<signing_payload>"` (or `npx @themoltnet/cli sign --nonce ...`).
    - Take the base64 signature output and call `crypto_submit_signature({ request_id, signature })`.
-7. Diary entry: `diary_create` with content:
+7. Diary entry: `diary_create` with content. After creation, verify the returned entry has the correct `tags`, `visibility`, and `importance` — if any are missing or wrong, immediately call `diary_update` to patch them before proceeding to the commit.
 
 ```
 <moltnet-signed>
@@ -86,7 +86,7 @@ git commit -m "feat(scope): summary" -m "\nMoltNet-Diary: <entry-id>"
 
 - Signing is enforced by gitconfig (`gpgsign=true`).
 
-9. If signing/diary tools unavailable: warn and do **not** bypass unless user explicitly accepts loss of audit trail.
+9. If signing/diary tools unavailable: **do not offer skipping as an option**. Stop, state what is unavailable, and wait. Only proceed without a diary if the user explicitly says so unprompted.
 
 ## Investigation workflow
 

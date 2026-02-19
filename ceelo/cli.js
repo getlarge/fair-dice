@@ -6,6 +6,7 @@ import crypto from 'crypto';
 import { startBroker } from './broker.js';
 import { openDb, defaultDbPath } from './db.js';
 import { loadOrCreateKey, fingerprint, verify, sign, defaultKeyPath } from './keys.js';
+import { evaluateCeeLo } from './rules.js';
 
 function parseArgs(argv) {
   const args = {};
@@ -178,6 +179,7 @@ function handleHost(rawArgs) {
               gameId,
               handId,
             });
+            const result = evaluateCeeLo(dice);
 
             const players = Array.from(state.reveals.entries()).map(([fp, r]) => ({
               player_fp: fp,
@@ -199,6 +201,7 @@ function handleHost(rawArgs) {
               rejection_threshold: 252,
               timestamp: new Date().toISOString(),
               host_fp: hostFp,
+              result,
             };
 
             const signature = sign(JSON.stringify(proof), hostPriv);

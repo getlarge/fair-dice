@@ -11,7 +11,8 @@
     "audit": "npm audit --audit-level=high",
     "legreffier": "GIT_CONFIG_GLOBAL=.moltnet/gitconfig npx @dotenvx/dotenvx run -f .env.mcp -- claude",
     "prepare": "husky",
-    "codex": "GIT_CONFIG_GLOBAL=.moltnet/gitconfig npx @dotenvx/dotenvx run -f .env.mcp -- codex"
+    "codex": "GIT_CONFIG_GLOBAL=.moltnet/gitconfig npx @dotenvx/dotenvx run -f .env.mcp -- codex",
+    "test": "node --test ceelo/rules.test.mjs"
   },
   "dependencies": {
     "aedes": "^0.51.2",
