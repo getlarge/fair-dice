@@ -6,6 +6,7 @@ import { parseArgs } from 'node:util';
 import mqtt from 'mqtt';
 import { startHostRuntime } from './host.js';
 import { loadOrCreateKey, fingerprint, sign } from './keys.js';
+import { createShell } from './shell.js';
 
 function loadAllowlist(file) {
   if (!file) return null;
@@ -144,12 +145,22 @@ function handleVerify(argv) {
   console.log(JSON.stringify(proof, null, 2));
 }
 
+function handleUi(argv) {
+  // Delegate entirely to the Ink entry point — it re-parses its own args
+  import('./ui/index.js').catch(err => {
+    console.error('Failed to launch UI:', err.message);
+    process.exit(1);
+  });
+}
+
 function runCeelo(args) {
   const sub = args[0];
-  if (sub === 'host') return handleHost(args.slice(1));
-  if (sub === 'join') return handleJoin(args.slice(1));
+  if (sub === 'host')   return handleHost(args.slice(1));
+  if (sub === 'join')   return handleJoin(args.slice(1));
   if (sub === 'verify') return handleVerify(args.slice(1));
-  console.error('Usage: fair-dice ceelo <host|join|verify> [options]');
+  if (sub === 'shell')  return createShell({ mqttUrl: args[1] || 'ws://localhost:8080' });
+  if (sub === 'ui')     return handleUi(args.slice(1));
+  console.error('Usage: fair-dice ceelo <host|join|verify|shell|ui> [options]');
   process.exit(1);
 }
 

@@ -12,10 +12,14 @@
     "legreffier": "GIT_CONFIG_GLOBAL=.moltnet/gitconfig npx @dotenvx/dotenvx run -f .env.mcp -- claude",
     "prepare": "husky",
     "codex": "GIT_CONFIG_GLOBAL=.moltnet/gitconfig npx @dotenvx/dotenvx run -f .env.mcp -- codex",
-    "test": "node --test ceelo/rules.test.mjs ceelo/flow.test.mjs"
+    "test": "node --test ceelo/rules.test.mjs ceelo/flow.test.mjs",
+    "ui": "node ceelo/ui/index.js"
   },
   "dependencies": {
+    "@inkjs/ui": "^2.0.0",
     "aedes": "^0.51.2",
+    "ink": "^6.8.0",
+    "ink-spinner": "^5.0.0",
     "mqtt": "^5.4.0",
     "ws": "^8.16.0"
   },

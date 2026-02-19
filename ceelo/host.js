@@ -83,6 +83,10 @@ function createGameHandler({
       commit: payload.commit,
       pubkey: payload.pubkey,
     });
+    const joinCount = state.joins.size;
+    console.log(
+      `[${gameId}/${handId}] player joined: ${payload.player_fp.slice(0, 9)}…  (${joinCount}/${minPlayers} needed)`,
+    );
     db.prepare(
       'INSERT OR IGNORE INTO join_envelopes(game_id, hand_id, player_fp, envelope_json, ts) VALUES(?,?,?,?,?)',
     ).run(
@@ -104,6 +108,9 @@ function createGameHandler({
       }),
       qos: 1,
     });
+    if (state.joins.size >= minPlayers) {
+      console.log(`[${gameId}/${handId}] quorum reached — waiting for reveals`);
+    }
   }
 
   async function finalizeHand(state, handId) {
@@ -201,6 +208,9 @@ function createGameHandler({
       pubkey: payload.pubkey,
       commit: joinEnv.commit,
     });
+    console.log(
+      `[${gameId}/${handId}] reveal accepted: ${payload.player_fp.slice(0, 9)}…  (${state.reveals.size}/${minPlayers})`,
+    );
     db.prepare(
       'INSERT OR IGNORE INTO reveal_envelopes(game_id, hand_id, player_fp, envelope_json, ts) VALUES(?,?,?,?,?)',
     ).run(
@@ -211,8 +221,9 @@ function createGameHandler({
       new Date().toISOString(),
     );
     if (!state.proofed && state.reveals.size >= minPlayers) {
+      console.log(`[${gameId}/${handId}] all reveals in — finalizing hand`);
       finalizeHand(state, handId).catch(err =>
-        console.error(`Failed to finalize hand ${handId}:`, err.message),
+        console.error(`[${gameId}/${handId}] finalize error:`, err.message),
       );
     }
   }
@@ -286,6 +297,13 @@ function startHostRuntime({
   broker.on('publish', (packet, client) => {
     if (!client) return; // ignore broker-originated messages
     onPacket(packet);
+  });
+
+  broker.on('client', (client) => {
+    console.log(`[${gameId}] client connected:    ${client.id}`);
+  });
+  broker.on('clientDisconnect', (client) => {
+    console.log(`[${gameId}] client disconnected: ${client.id}`);
   });
 
   broker.publish({
