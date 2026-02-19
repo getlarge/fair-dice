@@ -322,7 +322,7 @@ function startHostRuntime({
     server.once('error', reject);
   });
 
-  return { broker, server, hostFp, lobby, ready };
+  return { broker, server, hostFp, hostPub, lobby, ready };
 }
 
 function stopHostRuntime({ broker, server }) {
