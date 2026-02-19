@@ -1,13 +1,22 @@
 {
   "name": "fair-dice",
   "version": "0.1.0",
+  "type": "module",
   "private": true,
   "description": "A provably fair dice roller with cryptographic audit trail",
+  "bin": {
+    "fair-dice": "./cli.js"
+  },
   "scripts": {
     "audit": "npm audit --audit-level=high",
     "legreffier": "GIT_CONFIG_GLOBAL=.moltnet/gitconfig npx @dotenvx/dotenvx run -f .env.mcp -- claude",
     "prepare": "husky",
-    "codex": "npx @dotenvx/dotenvx run -f .env.mcp -- codex"
+    "codex": "GIT_CONFIG_GLOBAL=.moltnet/gitconfig npx @dotenvx/dotenvx run -f .env.mcp -- codex"
+  },
+  "dependencies": {
+    "aedes": "^0.51.2",
+    "mqtt": "^5.4.0",
+    "ws": "^8.16.0"
   },
   "devDependencies": {
     "husky": "^9.0.0"

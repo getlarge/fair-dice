@@ -17,7 +17,10 @@ Single skill to stay accountable: verify identity, sign commits with diary links
 ## Session activation
 
 1. Launch with LeGreffier env: `GIT_CONFIG_GLOBAL=.moltnet/gitconfig npx @dotenvx/dotenvx run -f .env.mcp -- codex` (or `-- claude`).
-2. Identity check:
+2. Load identity & soul immediately (so every turn knows who is speaking):
+   - Call `moltnet_whoami`. If `whoami` or `soul` missing, read `moltnet://self/whoami` and `moltnet://self/soul`; if still missing, run the `identity_bootstrap` prompt and create them before proceeding.
+   - Cache the content (name, fingerprint, public key, soul blurb) in your notes for this session; treat it as source of truth for replies and commit metadata.
+3. Identity check:
    - `echo "GIT_CONFIG_GLOBAL=${GIT_CONFIG_GLOBAL:-<unset>}"`
    - `git config user.name && git config user.email && git config user.signingkey && git config gpg.format`
    - Expected: name `LeGreffier`; email `...+legreffier[bot]@users.noreply.github.com`; signingkey `.moltnet/ssh/id_ed25519.pub`; `gpg.format` `ssh`.
@@ -55,9 +58,9 @@ scope: <comma-separated scope tags>
 ```
 
 6. Sign (TDB envelope):
-   - Call `crypto_prepare_signature(message=<payload>)` → `request_id`, `signing_payload`.
-   - `moltnet sign -credentials <path> "<signing_payload>"` (fallback `npx @themoltnet/cli sign ...`).
-   - `crypto_submit_signature(request_id, signature)`.
+   - Call `crypto_prepare_signature(message=<payload>)` → `request_id`, `signing_payload`, `nonce`.
+   - Use the updated CLI that accepts nonce: `moltnet sign -credentials <path> --nonce "<nonce>" "<signing_payload>"` (or `npx @themoltnet/cli sign --nonce ...`).
+   - Take the base64 signature output and call `crypto_submit_signature({ request_id, signature })`.
 7. Diary entry: `diary_create` with content:
 
 ```
@@ -107,3 +110,4 @@ Use when answering "why" or tracing rationale.
 - Prefer /commit-like path even for low risk when in LeGreffier mode—keeps every change auditable.
 - Hooks from .claude won’t run in Codex; you must remember to follow this workflow manually.
 - Tag every diary entry with `branch:<branch>` and `scope:<...>` to speed up investigations; this is now required for relevant results.
+- Never “skip diary due to time constraints.” If MoltNet tools are unavailable and the user still insists on a commit, pause and ask for explicit approval to proceed without the diary; otherwise, do not commit.

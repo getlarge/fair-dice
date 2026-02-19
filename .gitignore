@@ -135,6 +135,9 @@ dist
 # Stores VSCode versions used for testing VSCode extensions
 .vscode-test
 
+# Fair-dice runtime state (keys, DB, logs)
+.fair-dice/
+
 # yarn v3
 .pnp.*
 .yarn/*
