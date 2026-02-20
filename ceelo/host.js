@@ -64,6 +64,24 @@ function createGameHandler({
     return handState.get(handId);
   }
 
+  // Publish authoritative retained game state so any client — including late
+  // joiners — always gets the current picture without counting ACKs themselves.
+  function publishState(handId, state, phase) {
+    broker.publish({
+      topic: `cee-lo/${gameId}/state`,
+      payload: JSON.stringify({
+        type: 'state',
+        game_id: gameId,
+        hand_id: handId,
+        phase,                          // joining | rolling | finalized
+        player_count: state.joins.size,
+        min_players: minPlayers,
+      }),
+      qos: 1,
+      retain: true,
+    });
+  }
+
   function handleJoin(state, handId, payload) {
     if (allowSet && !allowSet.has(payload.player_fp)) {
       console.warn(`Reject join from ${payload.player_fp}: not in allowlist`);
@@ -98,7 +116,7 @@ function createGameHandler({
     );
 
     broker.publish({
-      topic: `cee-lo/${gameId}/acks`,
+      topic: `cee-lo/${gameId}/acks/${payload.player_fp}`,
       payload: JSON.stringify({
         type: 'ack',
         game_id: gameId,
@@ -107,9 +125,12 @@ function createGameHandler({
         status: 'accepted',
       }),
       qos: 1,
+      retain: true,
     });
+    publishState(handId, state, 'joining');
     if (state.joins.size >= minPlayers) {
       console.log(`[${gameId}/${handId}] quorum reached — waiting for reveals`);
+      publishState(handId, state, 'rolling');
     }
   }
 
@@ -166,6 +187,7 @@ function createGameHandler({
       retain: true,
     });
     state.proofed = true;
+    publishState(handId, state, 'finalized');
     console.log(
       `Hand ${handId} finalized: ${result.description} (dice: ${dice.join(',')})`,
     );

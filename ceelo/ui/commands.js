@@ -1,19 +1,17 @@
 'use strict';
 
-import crypto from 'node:crypto';
-import { loadOrCreateKey, fingerprint, sign } from '../keys.js';
+import { parseArgs } from 'node:util';
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Command parser + executor.
-// Returns { type, ...fields } action objects consumed by the app reducer,
-// or { type: 'error', message } / { type: 'help' } for display-only events.
+// Command parser — pure, no side-effects, no crypto.
+// Returns { type, ...fields } consumed by the app reducer.
 // ─────────────────────────────────────────────────────────────────────────────
 
 const HELP = `Commands:
-  help                    show this message
-  lobbies                 list known lobbies
-  join <gameId> [keyPath] join a game (uses default key if omitted)
-  exit / quit             exit`;
+  help                                  show this message
+  lobbies                               list known lobbies
+  join <gameId> --key <path> [--hand h] join a game
+  exit / quit                           exit`;
 
 function parseCommand(line) {
   const parts = line.trim().split(/\s+/).filter(Boolean);
@@ -29,10 +27,25 @@ function parseCommand(line) {
       return { type: 'lobbies' };
 
     case 'join': {
-      const gameId  = args[0];
+      const gameId = args[0];
       if (!gameId) return { type: 'error', message: 'join requires <gameId>' };
-      const keyPath = args[1] || undefined;
-      return { type: 'join', gameId, handId: 'hand-1', keyPath };
+
+      let parsed;
+      try {
+        ({ values: parsed } = parseArgs({
+          args: args.slice(1),
+          options: {
+            key:  { type: 'string', short: 'k' },
+            hand: { type: 'string', short: 'h', default: 'hand-1' },
+          },
+          strict: true,
+        }));
+      } catch (err) {
+        return { type: 'error', message: err.message };
+      }
+
+      if (!parsed.key) return { type: 'error', message: 'join requires --key <path>' };
+      return { type: 'join', gameId, handId: parsed.hand, keyPath: parsed.key };
     }
 
     case 'exit':
@@ -44,45 +57,4 @@ function parseCommand(line) {
   }
 }
 
-// Build and publish a join envelope; return the pending reveal state
-function buildJoin({ gameId, handId, keyPath, publish }) {
-  const { privPem, pubPem } = loadOrCreateKey(keyPath);
-  const fp     = fingerprint(pubPem);
-  const seed   = crypto.randomBytes(32).toString('hex');
-  const commit = crypto.createHash('sha256').update(Buffer.from(seed, 'hex')).digest('hex');
-  const sig    = sign(`${gameId}:${handId}:${commit}`, privPem);
-
-  publish(`cee-lo/${gameId}/joins`, {
-    type: 'join',
-    game_id: gameId,
-    hand_id: handId,
-    player_fp: fp,
-    pubkey: pubPem,
-    commit,
-    signature: sig,
-  });
-
-  return { gameId, handId, seed, pubPem, privPem, fp, revealSent: false };
-}
-
-// Build and publish a reveal envelope on ACK
-function buildReveal({ ack, joinState, publish }) {
-  if (joinState.revealSent) return false;
-  if (ack.player_fp !== joinState.fp) return false;
-  if (ack.hand_id   !== joinState.handId) return false;
-  if (ack.status    !== 'accepted') return false;
-
-  const sig = sign(`${ack.game_id}:${ack.hand_id}:${joinState.seed}`, joinState.privPem);
-  publish(`cee-lo/${ack.game_id}/reveals`, {
-    type: 'reveal',
-    game_id: ack.game_id,
-    hand_id: ack.hand_id,
-    player_fp: joinState.fp,
-    pubkey: joinState.pubPem,
-    seed: joinState.seed,
-    signature: sig,
-  });
-  return true;
-}
-
-export { parseCommand, buildJoin, buildReveal, HELP };
+export { parseCommand, HELP };

@@ -1,11 +1,14 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import crypto from 'node:crypto';
-import { promisify } from 'node:util';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
 import mqtt from 'mqtt';
 import { startHostRuntime, stopHostRuntime, hkdfDice } from './host.js';
 import { sign, fingerprint, verify } from './keys.js';
 import { startBroker } from './broker.js';
+import { joinGame } from './player.js';
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Helpers
@@ -17,6 +20,16 @@ function generateKeypair() {
     privPem: privateKey.export({ type: 'pkcs8', format: 'pem' }),
     pubPem:  publicKey.export({ type: 'spki',  format: 'pem' }),
   };
+}
+
+// Write a fresh keypair to a temp file; return the path.
+// Used by e2e joinGame() tests so each player gets a unique key.
+function tempKeyPath() {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ceelo-test-'));
+  const keyFile = path.join(dir, 'player_ed25519.pem');
+  const { privateKey } = crypto.generateKeyPairSync('ed25519');
+  fs.writeFileSync(keyFile, privateKey.export({ type: 'pkcs8', format: 'pem' }), { mode: 0o600 });
+  return keyFile;
 }
 
 function mqttClient(url) {
@@ -113,6 +126,36 @@ async function startTestHost(overrides = {}) {
   return { host, port, url, gameId };
 }
 
+// Next message whose topic starts with the given prefix
+function nextMessagePrefix(client, topicPrefix) {
+  return new Promise(resolve => {
+    function handler(t, msg) {
+      if (t.startsWith(topicPrefix)) {
+        client.removeListener('message', handler);
+        resolve(JSON.parse(msg.toString('utf8')));
+      }
+    }
+    client.on('message', handler);
+  });
+}
+
+function nextMessagePrefixOrTimeout(client, topicPrefix, ms = 300) {
+  return new Promise(resolve => {
+    const timer = setTimeout(() => {
+      client.removeListener('message', handler);
+      resolve(null);
+    }, ms);
+    function handler(t, msg) {
+      if (t.startsWith(topicPrefix)) {
+        clearTimeout(timer);
+        client.removeListener('message', handler);
+        resolve(JSON.parse(msg.toString('utf8')));
+      }
+    }
+    client.on('message', handler);
+  });
+}
+
 // Connect a client, subscribe to all game topics, await retained lobby
 async function connectPlayer(url, gameId) {
   const client = mqttClient(url);
@@ -121,7 +164,8 @@ async function connectPlayer(url, gameId) {
   // Register lobby listener before subscribe to catch the retained message
   const lobbyPromise = nextMessage(client, 'cee-lo/lobbies');
   await subscribeAsync(client, 'cee-lo/lobbies');
-  await subscribeAsync(client, `cee-lo/${gameId}/acks`);
+  await subscribeAsync(client, `cee-lo/${gameId}/acks/+`); // per-fp retained ACKs
+  await subscribeAsync(client, `cee-lo/${gameId}/state`);
   await subscribeAsync(client, `cee-lo/${gameId}/proofs`);
 
   const lobby = await lobbyPromise;
@@ -213,13 +257,13 @@ test('happy path: 2 players join and reveal → proof published', async t => {
   const s1 = crypto.randomBytes(32).toString('hex');
   const s2 = crypto.randomBytes(32).toString('hex');
 
-  const ack1Promise = nextMessage(client, `cee-lo/${gameId}/acks`);
+  const ack1Promise = nextMessagePrefix(client, `cee-lo/${gameId}/acks/`);
   await publishJoin({ client, gameId, handId, ...p1, seed: s1 });
   const ack1 = await ack1Promise;
   assert.equal(ack1.status, 'accepted');
   assert.equal(ack1.player_fp, fingerprint(p1.pubPem));
 
-  const ack2Promise = nextMessage(client, `cee-lo/${gameId}/acks`);
+  const ack2Promise = nextMessagePrefix(client, `cee-lo/${gameId}/acks/`);
   await publishJoin({ client, gameId, handId, ...p2, seed: s2 });
   await ack2Promise;
 
@@ -253,11 +297,11 @@ test('proof is signed by host and signature verifies', async t => {
   const s1 = crypto.randomBytes(32).toString('hex');
   const s2 = crypto.randomBytes(32).toString('hex');
 
-  const ack1 = nextMessage(client, `cee-lo/${gameId}/acks`);
+  const ack1 = nextMessagePrefix(client, `cee-lo/${gameId}/acks/`);
   await publishJoin({ client, gameId, handId, ...p1, seed: s1 });
   await ack1;
 
-  const ack2 = nextMessage(client, `cee-lo/${gameId}/acks`);
+  const ack2 = nextMessagePrefix(client, `cee-lo/${gameId}/acks/`);
   await publishJoin({ client, gameId, handId, ...p2, seed: s2 });
   await ack2;
 
@@ -287,20 +331,20 @@ test('duplicate join from same fingerprint is ignored', async t => {
   const s1 = crypto.randomBytes(32).toString('hex');
   const s1b = crypto.randomBytes(32).toString('hex'); // second attempt, different seed
 
-  const ack1 = nextMessage(client, `cee-lo/${gameId}/acks`);
+  const ack1 = nextMessagePrefix(client, `cee-lo/${gameId}/acks/`);
   await publishJoin({ client, gameId, handId, ...p1, seed: s1 });
   await ack1;
 
   // Second join from same player — host uses INSERT OR IGNORE, still sends ACK
   // but the stored commit must remain the first one
-  const ack2 = nextMessage(client, `cee-lo/${gameId}/acks`);
+  const ack2 = nextMessagePrefix(client, `cee-lo/${gameId}/acks/`);
   await publishJoin({ client, gameId, handId, ...p1, seed: s1b });
   await ack2;
 
   // Now reveal with the ORIGINAL seed — should still work
   const p2 = generateKeypair();
   const s2 = crypto.randomBytes(32).toString('hex');
-  const ack3 = nextMessage(client, `cee-lo/${gameId}/acks`);
+  const ack3 = nextMessagePrefix(client, `cee-lo/${gameId}/acks/`);
   await publishJoin({ client, gameId, handId, ...p2, seed: s2 });
   await ack3;
 
@@ -340,7 +384,7 @@ test('invalid join signature is rejected — no ACK sent', async t => {
     ),
   );
 
-  const ack = await nextMessageOrTimeout(client, `cee-lo/${gameId}/acks`, 300);
+  const ack = await nextMessagePrefixOrTimeout(client, `cee-lo/${gameId}/acks/`, 300);
   assert.equal(ack, null, 'no ACK for invalid signature');
 });
 
@@ -360,11 +404,11 @@ test('reveal with wrong seed (commit mismatch) — no proof', async t => {
   const s2 = crypto.randomBytes(32).toString('hex');
   const sWrong = crypto.randomBytes(32).toString('hex'); // different from committed seed
 
-  const ack1 = nextMessage(client, `cee-lo/${gameId}/acks`);
+  const ack1 = nextMessagePrefix(client, `cee-lo/${gameId}/acks/`);
   await publishJoin({ client, gameId, handId, ...p1, seed: s1 });
   await ack1;
 
-  const ack2 = nextMessage(client, `cee-lo/${gameId}/acks`);
+  const ack2 = nextMessagePrefix(client, `cee-lo/${gameId}/acks/`);
   await publishJoin({ client, gameId, handId, ...p2, seed: s2 });
   await ack2;
 
@@ -395,7 +439,7 @@ test('reveal before join is rejected — no proof', async t => {
   await publishReveal({ client, gameId, handId, ...p1, seed: s1 });
 
   // p2 does the full join+reveal
-  const ack2 = nextMessage(client, `cee-lo/${gameId}/acks`);
+  const ack2 = nextMessagePrefix(client, `cee-lo/${gameId}/acks/`);
   await publishJoin({ client, gameId, handId, ...p2, seed: s2 });
   await ack2;
   await publishReveal({ client, gameId, handId, ...p2, seed: s2 });
@@ -419,7 +463,7 @@ test('minPlayers: 3 — proof only after third reveal', async t => {
 
   // All 3 join
   for (let i = 0; i < 3; i++) {
-    const ack = nextMessage(client, `cee-lo/${gameId}/acks`);
+    const ack = nextMessagePrefix(client, `cee-lo/${gameId}/acks/`);
     await publishJoin({ client, gameId, handId, ...players[i], seed: seeds[i] });
     await ack;
   }
@@ -439,6 +483,117 @@ test('minPlayers: 3 — proof only after third reveal', async t => {
   assert.ok(proof.dice.every(d => d >= 1 && d <= 6), 'dice faces in range');
 });
 
+test('host publishes state after each join and at quorum', async t => {
+  const { host, url, gameId } = await startTestHost();
+  const handId = 'hand-1';
+
+  const { client } = await connectPlayer(url, gameId);
+  t.after(async () => {
+    await client.endAsync();
+    await stopHostRuntime(host);
+  });
+
+  const p1 = generateKeypair();
+  const p2 = generateKeypair();
+  const s1 = crypto.randomBytes(32).toString('hex');
+  const s2 = crypto.randomBytes(32).toString('hex');
+
+  // After p1 joins: state phase=joining, player_count=1
+  const state1 = nextMessage(client, `cee-lo/${gameId}/state`);
+  const ack1   = nextMessagePrefix(client, `cee-lo/${gameId}/acks/`);
+  await publishJoin({ client, gameId, handId, ...p1, seed: s1 });
+  await ack1;
+  const gs1 = await state1;
+  assert.equal(gs1.phase,        'joining');
+  assert.equal(gs1.player_count, 1);
+  assert.equal(gs1.min_players,  2);
+
+  // After p2 joins: host publishes joining(count=2) then rolling(count=2).
+  // Collect all state messages published while p2 joins, then assert rolling appeared.
+  const statesAfterP2 = [];
+  const stateCollector = (topic, msg) => {
+    if (topic === `cee-lo/${gameId}/state`) {
+      try { statesAfterP2.push(JSON.parse(msg.toString('utf8'))); } catch { /* ignore */ }
+    }
+  };
+  client.on('message', stateCollector);
+
+  const ack2 = nextMessagePrefix(client, `cee-lo/${gameId}/acks/`);
+  await publishJoin({ client, gameId, handId, ...p2, seed: s2 });
+  await ack2;
+  // Give broker a tick to deliver any in-flight state messages
+  await new Promise(r => setTimeout(r, 50));
+  client.removeListener('message', stateCollector);
+
+  const rollingState = statesAfterP2.find(gs => gs.phase === 'rolling') ?? null;
+  assert.ok(rollingState, 'rolling state published after quorum');
+  assert.equal(rollingState.player_count, 2);
+});
+
+test('host publishes finalized state after proof', async t => {
+  const { host, url, gameId } = await startTestHost();
+  const handId = 'hand-1';
+
+  const { client } = await connectPlayer(url, gameId);
+  t.after(async () => {
+    await client.endAsync();
+    await stopHostRuntime(host);
+  });
+
+  const p1 = generateKeypair(), p2 = generateKeypair();
+  const s1 = crypto.randomBytes(32).toString('hex');
+  const s2 = crypto.randomBytes(32).toString('hex');
+  const a1 = nextMessagePrefix(client, `cee-lo/${gameId}/acks/`);
+  await publishJoin({ client, gameId, handId, ...p1, seed: s1 });
+  await a1;
+  const a2 = nextMessagePrefix(client, `cee-lo/${gameId}/acks/`);
+  await publishJoin({ client, gameId, handId, ...p2, seed: s2 });
+  await a2;
+  await publishReveal({ client, gameId, handId, ...p1, seed: s1 });
+  await publishReveal({ client, gameId, handId, ...p2, seed: s2 });
+  // Wait for proof, then check state is finalized
+  await nextMessage(client, `cee-lo/${gameId}/proofs`);
+
+  // The finalized state should be retained — a new client can read it
+  const late = mqttClient(url);
+  t.after(() => late.endAsync());
+  await waitForConnect(late);
+  const lateState = nextMessage(late, `cee-lo/${gameId}/state`);
+  await subscribeAsync(late, `cee-lo/${gameId}/state`);
+  const gs = await lateState;
+  assert.equal(gs.phase, 'finalized');
+});
+
+test('late client gets current state via retained message', async t => {
+  const { host, url, gameId } = await startTestHost();
+  const handId = 'hand-1';
+
+  // P1 joins before P2 connects
+  const { client: early } = await connectPlayer(url, gameId);
+  t.after(async () => {
+    await early.endAsync();
+    await stopHostRuntime(host);
+  });
+
+  const p1 = generateKeypair();
+  const s1 = crypto.randomBytes(32).toString('hex');
+  const a1 = nextMessagePrefix(early, `cee-lo/${gameId}/acks/`);
+  await publishJoin({ client: early, gameId, handId, ...p1, seed: s1 });
+  await a1;
+
+  // P2 connects after P1 has already joined
+  const late = mqttClient(url);
+  t.after(() => late.endAsync());
+  await waitForConnect(late);
+  const statePromise = nextMessage(late, `cee-lo/${gameId}/state`);
+  await subscribeAsync(late, `cee-lo/${gameId}/state`);
+  const gs = await statePromise;
+
+  // Must reflect current reality: 1 player joined
+  assert.equal(gs.player_count, 1);
+  assert.equal(gs.phase,        'joining');
+});
+
 test('allowlisted player joins; non-allowlisted player is silently rejected', async t => {
   const p1 = generateKeypair();
   const p2 = generateKeypair(); // will be blocked
@@ -455,7 +610,7 @@ test('allowlisted player joins; non-allowlisted player is silently rejected', as
   });
 
   // p1 joins — should be accepted
-  const ack1 = nextMessage(client, `cee-lo/${gameId}/acks`);
+  const ack1 = nextMessagePrefix(client, `cee-lo/${gameId}/acks/`);
   const s1 = crypto.randomBytes(32).toString('hex');
   await publishJoin({ client, gameId, handId, ...p1, seed: s1 });
   const a1 = await ack1;
@@ -464,19 +619,11 @@ test('allowlisted player joins; non-allowlisted player is silently rejected', as
   // p2 joins — should be rejected silently (no ACK)
   const s2 = crypto.randomBytes(32).toString('hex');
   await publishJoin({ client, gameId, handId, ...p2, seed: s2 });
-  const ack2 = await nextMessageOrTimeout(client, `cee-lo/${gameId}/acks`, 300);
+  const ack2 = await nextMessagePrefixOrTimeout(client, `cee-lo/${gameId}/acks/`, 300);
   assert.equal(ack2, null, 'no ACK for non-allowlisted player');
 });
 
 test('two independent games on same broker do not interfere', async t => {
-  const { broker, server } = startBroker({ port: 0, host: '127.0.0.1' });
-  await new Promise((resolve, reject) => {
-    server.once('listening', resolve);
-    server.once('error', reject);
-  });
-  const port = server.address().port;
-  const url  = `ws://127.0.0.1:${port}`;
-
   // Two separate host runtimes on the same broker would need one broker instance.
   // Instead, spin up two independent host runtimes (each with their own broker)
   // and verify each produces its own proof independently.
@@ -486,20 +633,18 @@ test('two independent games on same broker do not interfere', async t => {
   t.after(async () => {
     await stopHostRuntime(hostA.host);
     await stopHostRuntime(hostB.host);
-    await new Promise((resolve, reject) => broker.close(err => err ? reject(err) : resolve()));
-    await new Promise((resolve, reject) => server.close(err => err ? reject(err) : resolve()));
   });
 
-  async function runGame({ host, url, gameId }) {
+  async function runGame({ url, gameId }) {
     const { client } = await connectPlayer(url, gameId);
     const handId = 'hand-1';
     const p1 = generateKeypair(), p2 = generateKeypair();
     const s1 = crypto.randomBytes(32).toString('hex');
     const s2 = crypto.randomBytes(32).toString('hex');
-    const a1 = nextMessage(client, `cee-lo/${gameId}/acks`);
+    const a1 = nextMessagePrefix(client, `cee-lo/${gameId}/acks/`);
     await publishJoin({ client, gameId, handId, ...p1, seed: s1 });
     await a1;
-    const a2 = nextMessage(client, `cee-lo/${gameId}/acks`);
+    const a2 = nextMessagePrefix(client, `cee-lo/${gameId}/acks/`);
     await publishJoin({ client, gameId, handId, ...p2, seed: s2 });
     await a2;
     const proofP = nextMessage(client, `cee-lo/${gameId}/proofs`);
@@ -530,10 +675,10 @@ test('retained proof delivered to client that connects after finalization', asyn
   const p1 = generateKeypair(), p2 = generateKeypair();
   const s1 = crypto.randomBytes(32).toString('hex');
   const s2 = crypto.randomBytes(32).toString('hex');
-  const a1 = nextMessage(gameClient, `cee-lo/${gameId}/acks`);
+  const a1 = nextMessagePrefix(gameClient, `cee-lo/${gameId}/acks/`);
   await publishJoin({ client: gameClient, gameId, handId, ...p1, seed: s1 });
   await a1;
-  const a2 = nextMessage(gameClient, `cee-lo/${gameId}/acks`);
+  const a2 = nextMessagePrefix(gameClient, `cee-lo/${gameId}/acks/`);
   await publishJoin({ client: gameClient, gameId, handId, ...p2, seed: s2 });
   await a2;
   const proofP = nextMessage(gameClient, `cee-lo/${gameId}/proofs`);
@@ -650,4 +795,137 @@ test('hkdfDice usedBytes are a hex string of plausible length', async () => {
   assert.match(usedBytes, /^[0-9a-f]+$/, 'usedBytes is hex');
   // At least 3 bytes used (one per die), at most 128 * 2 = 256 hex chars
   assert.ok(usedBytes.length >= 6 && usedBytes.length <= 256, 'usedBytes length plausible');
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// E2E tests using player.js — no UI, no manual MQTT protocol
+// ─────────────────────────────────────────────────────────────────────────────
+
+test('e2e: joinGame() — 2 players complete a full hand via player module', async t => {
+  const { host, url, gameId } = await startTestHost();
+
+  // Observer client subscribes to state and proofs
+  const observer = mqttClient(url);
+  await waitForConnect(observer);
+  const proofPromise = nextMessage(observer, `cee-lo/${gameId}/proofs`);
+  await subscribeAsync(observer, `cee-lo/${gameId}/proofs`);
+
+  t.after(async () => {
+    await observer.endAsync();
+    await stopHostRuntime(host);
+  });
+
+  // Spin up two players using the player module; each needs a distinct key file
+  const logs1 = [], errs1 = [];
+  const logs2 = [], errs2 = [];
+
+  const c1 = joinGame({
+    mqttUrl: url, gameId, handId: 'hand-1', keyPath: tempKeyPath(),
+    onLog:   msg => logs1.push(msg),
+    onError: msg => errs1.push(msg),
+  });
+  const c2 = joinGame({
+    mqttUrl: url, gameId, handId: 'hand-1', keyPath: tempKeyPath(),
+    onLog:   msg => logs2.push(msg),
+    onError: msg => errs2.push(msg),
+  });
+
+  t.after(async () => {
+    await c1.endAsync();
+    await c2.endAsync();
+  });
+
+  const proof = await proofPromise;
+
+  assert.equal(proof.game_id, gameId);
+  assert.equal(proof.hand_id, 'hand-1');
+  assert.ok(Array.isArray(proof.dice) && proof.dice.length === 3, '3 dice in proof');
+  assert.ok(proof.dice.every(d => d >= 1 && d <= 6), 'dice faces valid');
+  assert.ok(proof.result?.category, 'result has category');
+  assert.equal(proof.players.length, 2, '2 players in proof');
+  assert.equal(errs1.length, 0, `player 1 errors: ${errs1.join('; ')}`);
+  assert.equal(errs2.length, 0, `player 2 errors: ${errs2.join('; ')}`);
+});
+
+test('e2e: joinGame() — proof is signed by host and verifiable', async t => {
+  const { host, url, gameId } = await startTestHost();
+
+  const observer = mqttClient(url);
+  await waitForConnect(observer);
+  const proofPromise = nextMessage(observer, `cee-lo/${gameId}/proofs`);
+  await subscribeAsync(observer, `cee-lo/${gameId}/proofs`);
+
+  t.after(async () => {
+    await observer.endAsync();
+    await stopHostRuntime(host);
+  });
+
+  const c1 = joinGame({ mqttUrl: url, gameId, handId: 'hand-1', keyPath: tempKeyPath() });
+  const c2 = joinGame({ mqttUrl: url, gameId, handId: 'hand-1', keyPath: tempKeyPath() });
+  t.after(async () => { await c1.endAsync(); await c2.endAsync(); });
+
+  const proof = await proofPromise;
+  const { signature, ...proofWithoutSig } = proof;
+  const valid = verify(JSON.stringify(proofWithoutSig), signature, host.hostPub);
+  assert.ok(valid, 'host signature verifies');
+  assert.equal(proof.host_fp, host.hostFp);
+});
+
+test('e2e: joinGame() — 3 players, minPlayers=3', async t => {
+  const { host, url, gameId } = await startTestHost({ minPlayers: 3 });
+
+  const observer = mqttClient(url);
+  await waitForConnect(observer);
+  const proofPromise = nextMessage(observer, `cee-lo/${gameId}/proofs`);
+  await subscribeAsync(observer, `cee-lo/${gameId}/proofs`);
+
+  t.after(async () => {
+    await observer.endAsync();
+    await stopHostRuntime(host);
+  });
+
+  const clients = [
+    joinGame({ mqttUrl: url, gameId, handId: 'hand-1', keyPath: tempKeyPath() }),
+    joinGame({ mqttUrl: url, gameId, handId: 'hand-1', keyPath: tempKeyPath() }),
+    joinGame({ mqttUrl: url, gameId, handId: 'hand-1', keyPath: tempKeyPath() }),
+  ];
+  t.after(async () => { for (const c of clients) await c.endAsync(); });
+
+  const proof = await proofPromise;
+  assert.equal(proof.players.length, 3, '3 players in proof');
+  assert.ok(proof.dice.every(d => d >= 1 && d <= 6));
+});
+
+test('e2e: joinGame() — state topic transitions joining→rolling→finalized', async t => {
+  const { host, url, gameId } = await startTestHost();
+
+  const observer = mqttClient(url);
+  await waitForConnect(observer);
+  const phases = [];
+
+  observer.on('message', (topic, buf) => {
+    if (topic === `cee-lo/${gameId}/state`) {
+      try { phases.push(JSON.parse(buf.toString()).phase); } catch { /* ignore */ }
+    }
+  });
+  await subscribeAsync(observer, `cee-lo/${gameId}/state`);
+  await subscribeAsync(observer, `cee-lo/${gameId}/proofs`);
+  const proofPromise = nextMessage(observer, `cee-lo/${gameId}/proofs`);
+
+  t.after(async () => {
+    await observer.endAsync();
+    await stopHostRuntime(host);
+  });
+
+  const c1 = joinGame({ mqttUrl: url, gameId, handId: 'hand-1', keyPath: tempKeyPath() });
+  const c2 = joinGame({ mqttUrl: url, gameId, handId: 'hand-1', keyPath: tempKeyPath() });
+  t.after(async () => { await c1.endAsync(); await c2.endAsync(); });
+
+  await proofPromise;
+  // finalized state is published after proof — give broker a tick to deliver it
+  await new Promise(r => setTimeout(r, 50));
+
+  assert.ok(phases.includes('joining'),   'joining phase observed');
+  assert.ok(phases.includes('rolling'),   'rolling phase observed');
+  assert.ok(phases.includes('finalized'), 'finalized phase observed');
 });

@@ -9,23 +9,22 @@ import { LogPanel }     from './components/LogPanel.js';
 import { StatusBar }    from './components/StatusBar.js';
 import { CommandInput } from './components/CommandInput.js';
 import { useMqtt }      from './hooks/useMqtt.js';
-import { parseCommand, buildJoin, buildReveal, HELP } from './commands.js';
+import { parseCommand, HELP } from './commands.js';
+import { joinGame }     from '../player.js';
 
 // ─────────────────────────────────────────────────────────────────────────────
 // State
 // ─────────────────────────────────────────────────────────────────────────────
 const INITIAL = {
-  gameId:      null,
-  phase:       'idle',   // idle | joining | rolling | frozen
-  animPhase:   'idle',   // idle | rolling | landing | frozen
-  finalDice:   null,
-  result:      null,
-  // Track unique ACK'd fingerprints so we don't double-count retransmits
-  ackedPlayers: [],      // [fp, ...]
-  minPlayers:  2,
-  lobbies:     {},       // gameId → lobby
-  joins:       {},       // gameId → { handId, seed, privPem, pubPem, fp, revealSent }
-  log:         [],
+  gameId:       null,
+  phase:        'idle',  // idle | joining | rolling | frozen
+  animPhase:    'idle',  // idle | rolling | landing | frozen
+  finalDice:    null,
+  result:       null,
+  playerCount:  0,       // authoritative from host state messages
+  minPlayers:   2,
+  lobbies:      {},      // gameId → lobby
+  log:          [],
 };
 
 let _seq = 0;
@@ -56,34 +55,30 @@ function reducer(state, action) {
         ...state,
         gameId: action.gameId,
         phase:  'joining',
-        joins:  { ...state.joins, [action.gameId]: action.joinState },
         log: [...state.log, logEntry('join',
-          `join sent → game=${action.gameId}  hand=${action.joinState.handId}`)],
+          `join sent → game=${action.gameId}`)],
       };
     }
 
-    case 'ACK_RECEIVED': {
-      const { ack } = action;
-      // Only track ACKs for our current game
-      if (ack.game_id !== state.gameId) return state;
-      // De-duplicate: same fp already counted
-      if (state.ackedPlayers.includes(ack.player_fp)) {
-        return {
-          ...state,
-          log: [...state.log, logEntry('ack',
-            `re-ack ${ack.player_fp?.slice(0,9)}… (ignored)`)],
-        };
-      }
-      const ackedPlayers = [...state.ackedPlayers, ack.player_fp];
-      const count = ackedPlayers.length;
-      const startRoll = count >= state.minPlayers;
+    // Authoritative game state from the host — drives phase and player count.
+    // Published retained so late-joining clients get it immediately on subscribe.
+    case 'GAME_STATE': {
+      const { gs } = action;
+      if (gs.game_id !== state.gameId) return state;
+      const phase     = gs.phase === 'rolling'   ? 'rolling'
+                      : gs.phase === 'finalized' ? 'frozen'
+                      : state.phase; // 'joining' keeps UI phase unchanged
+      const animPhase = gs.phase === 'rolling' && state.animPhase === 'idle'
+                      ? 'rolling'
+                      : state.animPhase;
       return {
         ...state,
-        ackedPlayers,
-        phase:     startRoll ? 'rolling' : state.phase,
-        animPhase: startRoll ? 'rolling' : state.animPhase,
-        log: [...state.log, logEntry('ack',
-          `player ${ack.player_fp?.slice(0,9)}… accepted  [${count}/${state.minPlayers}]`)],
+        phase,
+        animPhase,
+        playerCount: gs.player_count,
+        minPlayers:  gs.min_players,
+        log: [...state.log, logEntry('state',
+          `game=${gs.game_id}  players=${gs.player_count}/${gs.min_players}  phase=${gs.phase}`)],
       };
     }
 
@@ -92,10 +87,10 @@ function reducer(state, action) {
       const isOurGame = state.gameId === proof.game_id;
       return {
         ...state,
-        finalDice: isOurGame ? proof.dice  : state.finalDice,
-        result:    isOurGame ? proof.result : state.result,
-        phase:     isOurGame ? 'frozen'    : state.phase,
-        animPhase: isOurGame ? 'landing'   : state.animPhase,
+        finalDice: isOurGame ? proof.dice   : state.finalDice,
+        result:    isOurGame ? proof.result  : state.result,
+        phase:     isOurGame ? 'frozen'      : state.phase,
+        animPhase: isOurGame ? 'landing'     : state.animPhase,
         log: [...state.log, logEntry('proof',
           `game=${proof.game_id}  dice=${proof.dice?.join('-')}  → ${proof.result?.description ?? '?'}`)],
       };
@@ -131,16 +126,9 @@ export function App({ mqttUrl, minPlayers = 2 }) {
   const { exit } = useApp();
   const [state, dispatch] = useReducer(reducer, { ...INITIAL, minPlayers });
 
-  // Keep a ref to latest state so the MQTT callback never captures stale closures
-  const stateRef = useRef(state);
-  stateRef.current = state;
-
-  // joinsRef is updated synchronously in handleCommand right after buildJoin returns,
-  // before React re-renders. onMessage reads from here so ACKs that arrive in the same
-  // tick as the dispatch never miss the join state.
-  const joinsRef  = useRef({});   // gameId → joinState (same shape as state.joins)
-
-  const publishRef = useRef(null);
+  // Track active player client per game (gameId → mqtt client).
+  // On new join we end the old client for that game first.
+  const playerClientsRef = useRef(new Map());
 
   // Flip animPhase from landing → frozen after the landing animation completes
   React.useEffect(() => {
@@ -151,27 +139,24 @@ export function App({ mqttUrl, minPlayers = 2 }) {
     }
   }, [state.animPhase]);
 
+  // Clean up all player clients on unmount
+  React.useEffect(() => {
+    return () => {
+      for (const client of playerClientsRef.current.values()) {
+        try { client.end(true); } catch { /* ignore */ }
+      }
+    };
+  }, []);
+
   // ── MQTT message handler ──────────────────────────────────────────────────
-  // Uses stateRef so it always reads current state without being recreated.
   const onMessage = useCallback((topic, payload) => {
     if (topic === 'cee-lo/lobbies') {
       dispatch({ type: 'LOBBY_SEEN', lobby: payload });
       return;
     }
 
-    if (topic.endsWith('/acks')) {
-      dispatch({ type: 'ACK_RECEIVED', ack: payload });
-      // Auto-reveal: read from joinsRef (updated synchronously before dispatch,
-      // so this always has the current seed even if React hasn't re-rendered yet).
-      const join = joinsRef.current[payload.game_id];
-      if (join && !join.revealSent && publishRef.current) {
-        const sent = buildReveal({ ack: payload, joinState: join, publish: publishRef.current });
-        if (sent) {
-          join.revealSent = true; // intentional mutation of the ref object
-          dispatch({ type: 'LOG_ADD', logType: 'reveal',
-            text: `reveal sent → game=${payload.game_id}` });
-        }
-      }
+    if (topic.endsWith('/state')) {
+      dispatch({ type: 'GAME_STATE', gs: payload });
       return;
     }
 
@@ -179,10 +164,9 @@ export function App({ mqttUrl, minPlayers = 2 }) {
       dispatch({ type: 'PROOF_RECEIVED', proof: payload });
       return;
     }
-  }, []); // stable — reads state via stateRef
+  }, []);
 
-  const { connected, publish } = useMqtt({ mqttUrl, onMessage });
-  publishRef.current = publish;
+  const { connected } = useMqtt({ mqttUrl, onMessage });
 
   // ── Command handler ───────────────────────────────────────────────────────
   const handleCommand = useCallback((line) => {
@@ -190,7 +174,6 @@ export function App({ mqttUrl, minPlayers = 2 }) {
     if (!cmd) return;
 
     if (cmd.type === 'help') {
-      // Print each help line as a separate log entry so it wraps properly
       HELP.split('\n').forEach(l =>
         dispatch({ type: 'LOG_ADD', logType: 'info', text: l }));
       return;
@@ -204,20 +187,19 @@ export function App({ mqttUrl, minPlayers = 2 }) {
         dispatch({ type: 'LOG_ADD', logType: 'error', text: 'not connected to broker' });
         return;
       }
-      try {
-        const joinState = buildJoin({
-          gameId:  cmd.gameId,
-          handId:  cmd.handId,
-          keyPath: cmd.keyPath,
-          publish,
-        });
-        // Update joinsRef synchronously BEFORE dispatch so onMessage can find
-        // the seed even if an ACK arrives before React re-renders.
-        joinsRef.current[cmd.gameId] = joinState;
-        dispatch({ type: 'JOIN_SENT', gameId: cmd.gameId, joinState });
-      } catch (err) {
-        dispatch({ type: 'LOG_ADD', logType: 'error', text: err.message });
-      }
+      // End any existing client for this game before creating a new one
+      const existing = playerClientsRef.current.get(cmd.gameId);
+      if (existing) { try { existing.end(true); } catch { /* ignore */ } }
+      dispatch({ type: 'JOIN_SENT', gameId: cmd.gameId });
+      const client = joinGame({
+        mqttUrl,
+        gameId:  cmd.gameId,
+        handId:  cmd.handId,
+        keyPath: cmd.keyPath,
+        onLog:   (msg) => dispatch({ type: 'LOG_ADD', logType: 'info', text: msg }),
+        onError: (msg) => dispatch({ type: 'LOG_ADD', logType: 'error', text: msg }),
+      });
+      playerClientsRef.current.set(cmd.gameId, client);
       return;
     }
     if (cmd.type === 'exit') {
@@ -227,9 +209,7 @@ export function App({ mqttUrl, minPlayers = 2 }) {
     if (cmd.type === 'error') {
       dispatch({ type: 'LOG_ADD', logType: 'error', text: cmd.message });
     }
-  }, [connected, publish, exit]);
-
-  const playerCount = state.ackedPlayers.length;
+  }, [connected, mqttUrl, exit]);
 
   return React.createElement(
     Box, { flexDirection: 'column', height: '100%' },
@@ -249,7 +229,7 @@ export function App({ mqttUrl, minPlayers = 2 }) {
     React.createElement(StatusBar, {
       gameId:      state.gameId,
       phase:       state.phase,
-      playerCount,
+      playerCount: state.playerCount,
       minPlayers:  state.minPlayers,
     }),
 
