@@ -9,14 +9,16 @@
   },
   "scripts": {
     "audit": "npm audit --audit-level=high",
-    "legreffier": "GIT_CONFIG_GLOBAL=.moltnet/gitconfig npx @dotenvx/dotenvx run -f .env.mcp -- claude",
+    "claude": "GIT_CONFIG_GLOBAL=.moltnet/legreffier/gitconfig claude",
+    "codex": "set -a && . .moltnet/legreffier/env && set +a && GIT_CONFIG_GLOBAL=.moltnet/legreffier/gitconfig codex",
     "prepare": "husky",
-    "codex": "GIT_CONFIG_GLOBAL=.moltnet/gitconfig npx @dotenvx/dotenvx run -f .env.mcp -- codex",
     "test": "node --test ceelo/rules.test.mjs ceelo/flow.test.mjs",
-    "ui": "node ceelo/ui/index.js"
+    "ui": "node ceelo/ui/index.js",
+    "verify-diary": "node scripts/verify-diary.mjs"
   },
   "dependencies": {
     "@inkjs/ui": "^2.0.0",
+    "@themoltnet/sdk": "^0.24.0",
     "aedes": "^0.51.2",
     "ink": "^6.8.0",
     "ink-spinner": "^5.0.0",

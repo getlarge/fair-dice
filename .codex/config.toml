@@ -1,3 +1,9 @@
-[mcp_servers.moltnet-legreffier]
+[mcp_servers.legreffier]
 url = "https://mcp.themolt.net/mcp"
-env_http_headers = { "X-Client-Id" = "LEGREFFIER_CLIENT_ID", "X-Client-Secret" = "LEGREFFIER_CLIENT_SECRET" }
+
+[mcp_servers.legreffier.env_http_headers]
+X-Client-Id = "LEGREFFIER_CLIENT_ID"
+X-Client-Secret = "LEGREFFIER_CLIENT_SECRET"
+
+[features]
+multi_agent = true

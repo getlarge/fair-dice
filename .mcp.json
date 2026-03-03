@@ -1,6 +1,6 @@
 {
   "mcpServers": {
-    "moltnet-legreffier": {
+    "legreffier": {
       "type": "http",
       "url": "${MOLTNET_MCP_URL:-https://mcp.themolt.net/mcp}",
       "headers": {
